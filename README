@@ -1,0 +1,264 @@
+NAME
+    mysql-backup
+
+SYNOPSIS
+    Please see MySQL::Backup thread in module-authors mailing list at
+    perl.org <module-authors@perl.org>. I just copied everything from my
+    MySQL::Backup project into this namespace as a result of that
+    discussion. I'll be breaking out the backup management and mysql
+    specific parts and getting this dist passing basic tests again ASAP.
+
+      shell% mysql-backup /path/to/mysql-backup.conf
+
+new() constructor for Backup::Config object
+        Gets all config information from the config file and also
+        gets some data and values from the database itself. Then 
+        stores all this information as attributes in 
+        Backup::Config object. All attributes are accessed by 
+        method $obj->section(attr_name) where attr_name should be replaced
+        by the name of the attribute which value is requested.
+    
+        To set the value, call $obj->section->attr_name($val)
+        All accessors and mutators are created by AUTOLOAD.
+
+_get_program_path()
+            Gets a name of a program and returns the full path to it.
+            If the path contains anything than slashes, alhpanumeric charactes 
+            and underscores and dashes undef is returned.
+
+usage()
+        Prints an usage message for the program on the screen and then exits.
+
+run()
+        This is where most of the work in the program is done.
+        It logs some messages to the log file and invokes the subroutines
+        for database backup and log backup and rotation.
+
+_get_process_list()
+            Returns a list of all mysql processes running currently on the server.
+
+            Gets the processlist from dbms and print it to the LOG the fields are
+            as follows:
+            Id  User Host db Command Time State Info
+
+            The assumption is that these fields will not change. It's hard to make
+            a dynamic script because LISTFIELDS works only on tables, and retrieval
+            to a hash does not preserve the order of the fields.
+
+log_messages
+            Logs all messages accumulated so far to a log file 
+            which name is specified in the config variable log_file. 
+
+_test_create_dirs
+            Test for the existence and writeability of specified directories.
+            If the directories do not exist, attempt to create them.  If unable
+            to create writeable directories, fail with error.
+
+_rotate_error_log()
+            The mysql error logs don't operate the same way as the other logs.
+            As of mysql 4.0.10, every flush-logs command will cause the error log
+            to rotate to a file with an "-old" suffix attached.  This is
+            regardless of the file's size.  Mysql shutdown/startup will *not*
+            rotate the error log to the -old file.  Any previous -old file
+            is deleted.
+
+            This function attempts to restore some sanity to how mysql treats
+            the error log.  Call this function after the flush-logs command.
+            We will take new -old file and append it to the end of our own file,
+            (different name) and delete the -old file.  We'll then call the usual
+            _rotate_generic_log function on it.
+
+_cycle_bin_logs()
+            Issues command to mysqld to finish writing to the current binary
+            update log and start writing to a new one.  We then push all of
+            the bin-logs (except for the newest one) into [dump_dir]/00/.
+
+            The flush logs command causes mysqld to close the old (already renamed)
+            general query and slow query logs and reopen the logs of the usual
+            file name.  It also causes mysqld to flush the binary update log and
+            begin writing to a new binlog file.  It does not affect the error 
+            log, only a restart of mysqld will start a new error log.
+
+            The flush hosts command will clean up the hosts cache.
+
+_backup_databases()
+            Backup all databases on the server DBMS which are mentioned 
+            explicitly or as a pattern in the [included-databases] section 
+            in the config file.
+
+            This function will dump all specified databases to .sql.gz files
+            in the directory [dump_dir]/new/.  If there were no errors during
+            backup, _rotate_dump_dirs will then rename it [dump_dir]/00/.
+
+            If this function encounters errors during backup, the partial dumps 
+            to [dump_dir]/new/ will remain until the next time this function is
+            executed.  At that time, the contents of [dump_dir]/new/ will be
+            destroyed and new dumps will be placed there.
+
+            At no time are binary update logs ever placed in [dump_dir]/new/.
+
+            Return with the number of errors encountered during backup.
+
+_rotate_dump_dirs()
+            The dump directories contain output from both the full, weekly mysql
+            dump as well as the incremental binary update logs that follow the
+            dump (possibly multiple binlogs per day).  Rotate these directory 
+            names to conform to convention:
+
+              [dump_dir]/00/  - most recent dump
+              [dump_dir]/01/   - next most recent
+              ...
+              [dump_dir]/_NN/       - oldest
+
+            Where N is [dump_copies] - 1 (in the config file).  [dump_dir]/new/
+            is a temporary directory created from _backup_databases.  This will
+            be renamed 00/, 00/ will be renamed 01/, and so on.
+
+_tidy_dump_dirs()
+            The dump directories contain output from both the full, weekly mysql
+            dump as well as the incremental binary update logs that follow the
+            dump (possibly multiple binlogs per day).  Sometimes a user might
+            delete a directory between backup runs (particularly if it has bad
+            dumps).
+
+            This function is intended to be run before backups start.  It will
+            Attempt to make directory names to conform to convention:
+
+              [dump_dir]/00/  - most recent dump
+              [dump_dir]/01/   - next most recent
+              ...
+              [dump_dir]/NN/        - oldest
+
+            If there are missing directories, _tidy_dump_dirs will create a
+            directory to take its place, such that 00/ should always exist
+            and there should be no gaps in the numbering of old directories.  In
+            other words, N+1 should be the total number of directories in [dump_dir].
+
+            If there are no gaps to begin with, _tidy_dump_dirs does not rename
+            anything.
+
+            This function will also delete any xx directories that exceed the
+            [dump_copies] config variable.
+
+            It will never touch [dump_dir]/new/.  It will never modify the contents
+            of any of these subdirectories (unless its deleting the whole subdir).
+
+            It will create [dump_dir] and [dump_dir]/00/ if they do not exist.
+
+error()
+            Logs all the errors so far to a log file then 
+            sends an email and exits.
+
+send_email_notification()
+            Sends the data from the 00 run of the program 
+            which gets stored in the log file by email. The exact 
+            behaviour for this subroutine is controlled by the 
+            varibles in [mail-setup] section in the config file
+
+INSTALLATION
+    To install this module type the following:
+
+       perl Makefile.PL
+       make
+       make test
+       make install
+
+DEPENDENCIES
+    This module requires these other modules and libraries:
+
+      Mail::Sendmail # if you want email reports
+      YAML
+      Sys::Hostname
+      File::Copy
+      File::Path
+
+DESCRIPTION
+    Manages rotation of mysql database logs and database backups. Reads
+    information on which databases to back up on what days fo the week from
+    the configuration file. If no file is specified, it will look for one at
+    /etc/mysql-backup.conf. If no configuration file is found program will
+    exit with a failure.
+
+    This program assumes a MySQL 4.0.x server that is at least 4.0.10. It
+    will likely work with current 1.23.xx server, but that has not been
+    tested. Please let the maintainers know if you use this tool succesfully
+    with other versions of MySQL or Perl so we can note what systems it
+    works with.
+
+    The expected usage of this program is for it to be run daily by a cron
+    job, at a time of day convienient to have the backups occur. This
+    program uses the administrative tools provided with MySQL (mysqladmin
+    and mysqldump) as well as gzip for compression of backups.
+
+    Every time this program is run it will flush the MySQL logs. The binary
+    update log will be moved into /path/to/dump/dir/00. Error log and slow
+    query log files are rotated only if they exceeded the size limit
+    specified in the confguration file.
+
+    If it is run on a day when full database backups are specified, then all
+    databases specified in the config file are dumped and written to the
+    directory specified in dump_dir variable in the config file. If there
+    are no problems with this operation, previous full backups from
+    dump_dir/00 are moved to directory dump_dir/01 and all the files in
+    dump_dir/01 (full database backups and log files) are deleted from it or
+    moved to dump_dir/02 etc. to the archival depth specified in the config
+    file. This way there always [dump_copies] full database backups - one in
+    00/ and [dump_copies]-1 in the xx directories.
+
+    Detailed information about the different configuration parameters can be
+    found in the comments in the configuration file
+
+    log-slow-queries log-long-format log-bin
+
+OPTIONS
+    logfile
+        Filename for logging backup proceedure. Overrides conf file.
+
+    add_databases
+        Additional databases to back up. These will be backed up *in
+        addation* to any databases specified in the conf file. Note - this
+        adds databases to the list of those to be backed up. If the program
+        is being run on a day when database backups are not scheduled, the
+        extra databases specified will not be backed up.
+
+    backup
+        If present this option forces full database backups to be done, even
+        if not normally scheduled.
+
+    help
+        Outputs this help file.
+
+    d   ** NOT IMPLIMENTED **
+
+        Turn on debugging. Optionally takes a filename to store debugging
+        and any error messages to.
+
+    v   ** NOT IMPLIMENTED **
+
+        Increases debugging vebosity. If three or more v's provided (-v -v
+        -v) than program will exit on warnings.
+
+TO DO
+    Impliment debugging output options.
+
+HISTORY
+    0.8     First functional release.
+
+SEE ALSO
+    mysql-backup.conf
+
+AUTHOR
+    Sean P. Quinlan, <sean@quinlan.org>
+
+    Original version by Stefan Dragnev, <dragnev@molbio.mgh.harvard.edu>
+    with contributions from Norbert Kremer,
+    <kremer@molbio.mgh.harvard.edu<gt> and Danny Park,
+    <park@molbio.mgh.harvard.edu.<gt>
+
+COPYRIGHT AND LICENSE
+    Copyright (C) 2004 by Sean P. Quinlan & Stefan Dragnev
+
+    This library is free software; you can redistribute it and/or modify it
+    under the same terms as Perl itself, either Perl version 5.8.3 or, at
+    your option, any later version of Perl 5 you may have available.
+
