@@ -15,6 +15,7 @@ WriteMakefile(
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM  => 'lib/DBA/Backup.pm', # retrieve abstract from module
        AUTHOR         => 'Sean P. Quinlan <gilant@gmail.com>') : ()),
+       INSTALLSCRIPT => $bin_dir, # doesn't work?
 );
 
 print <<CONF;

@@ -1,4 +1,4 @@
-bin/mysql-backup
+bin/dba-backup
 create_backup_account.sql
 etc/dba-backup.yml
 lib/DBA/Backup.pm

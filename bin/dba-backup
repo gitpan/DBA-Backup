@@ -1,0 +1,74 @@
+#!/usr/bin/perl
+
+
+=head1 NAME
+
+dba-backup - Scheduler script for initiating database backups
+
+=head1 SYNOPSIS
+
+  In cron file:
+    <min> <hour> * * * /path/to/dba-backup
+
+  shell% dba-backup </path/to/dba-backup.yml>
+
+=head1 DESCRIPTION
+
+Simple script for initiating backups using DBA::Backup. It is intended to be
+executed by a scheduler such as cron, providing functionally automated
+backups. However this script is also useful for calling from the command line
+to test the backup proceedure.
+
+=cut
+
+
+use strict;
+use warnings;
+
+use DBA::Backup;
+use Getopt::Long;
+
+my %opts = ();
+my $result = GetOptions(\%opts,'v+',"d:s",'help|h','logfile=s',
+	'add_databases=s','backup');
+
+$opts{CONF_FILE} = shift || '/etc/mysql-backup.conf';
+
+our $VERSION = '0.4';
+
+# prevent this script from granting any privilege to all (other users)
+umask(0117); 
+
+my $backup   = new DBA::Backup(\%opts);
+
+$backup->run();
+$backup->log_messages();
+$backup->send_email_notification();
+
+exit;
+
+=head1 SEE ALSO
+
+The mailing list for the DBA modules is perl-dba@fini.net. See
+http://lists.fini.net/mailman/listinfo/perl-dba to subscribe.
+
+dba-backup.yml
+DBA::Backup
+
+=head1 AUTHOR
+
+Sean P. Quinlan, E<lt>gilant@gmail.comE<gt>
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2004 by Sean P. Quinlan
+
+Original version by Stefan Dragnev, E<lt>dragnev@molbio.mgh.harvard.eduE<gt>
+with contributions from Norbert Kremer, E<lt>kremer@molbio.mgh.harvard.edu<gt>
+and Danny Park, E<lt>park@molbio.mgh.harvard.edu.<gt>
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.8.3 or,
+at your option, any later version of Perl 5 you may have available.
+
+=cut

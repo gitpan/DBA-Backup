@@ -23,9 +23,22 @@ http://lists.fini.net/mailman/listinfo/perl-dba to subscribe.
   $dba->log_messages();
   $dba->send_email_notification();
 
+=begin dev
+
+Required methods (can be void if appropriate):
+<server>_flush_logs # so all logs are current
+<server>_rotate_logs # rotate specified log types
+<server>_dump_databases # as server optimized SQL file
+<server>_stop_server
+<server>_start_server
+<server>_lock_database # (s)?
+
+
+=end dev
+
 =cut
 
-use 5.008003;
+use 5.006001;
 use strict;
 use warnings;
 
@@ -36,7 +49,7 @@ use Mail::Sendmail; # for sending mail notifications
 use YAML qw(LoadFile); # config file processing
 
 
-our $VERSION = '0.1';
+our $VERSION = '0.2_1';
 
 # prevent this module from granting any privilege to all (other users)
 umask(0117);
@@ -88,12 +101,27 @@ sub new {
 	
 	# Stores the name of the current config file in the object
 	$HR_conf->{backup_params}{CONF_FILE} = $params{CONF_FILE};
-	$HR_conf->{db_connect}{HOSTNAME} = Sys::Hostname::hostname();
+	$HR_conf->{HOSTNAME} = Sys::Hostname::hostname();
 	
-	# list of database servers (limit 1/type ATM) to backup
-	my @rdbms = grep(/\w+_backup/, keys %{$HR_conf});
-	$HR_conf->{backup_servers} = \@rdbms;
+	# list of servers to back up
+	my @servers = grep(/^server_/, keys %{$HR_conf});
+	$HR_conf->{backup_servers} = \@servers;
+	# generate list of unique server types
+	my %extensions = ();
+	foreach my $server (@servers) {
+		my $type = lc($HR_conf->{$server}{server_type});
+		$extensions{$type} = 1;
+	} # foreach server
 	
+	# load extension for each server type
+	foreach my $ext (keys %extensions) {
+		my $mod = "DBA/Backup/$ext.pm";
+		require $mod && import $mod;
+		push(@ISA,"DBA::Backup::$ext");
+	} # foreach class to load
+	
+	# Yes, I'm currently being very lazy and using the configuration
+	# hash as self and letting my methods access directly.
 	return bless $HR_conf, $class;
 } # end new()
 
@@ -116,7 +144,7 @@ sub _open_log_file {
 	$SIG{warn} = \&catch_sig;
 	$SIG{die} = \&catch_sig;
 	
-	warn "Testing sig handlers";
+	$self->_debug( "Testing sig handlers");
 	
 	$|++;
 	return $LOG;
@@ -171,48 +199,52 @@ sub run {
 	my $self = shift;
 	my $time = localtime();
 	
-#	warn "Starting log";
+	my $conf_file = $self->{backup_params}{CONF_FILE};
+	$self->_debug("Starting log");
 	
 	# Greeting message
 	print $self->{LOG} <<LOG;
 	
 *** DBA::Backup process started [$time] ***
+Backup config file: $conf_file
 
 LOG
 	
 	# manage backups for each server
 	foreach my $server (@{$HR_conf->{backup_servers}}) {
-		# require and import server module
-		my $server_pkg = "DBA::Backup::$server";
-		require $server_pkg && import $server_pkg;
-		# create dba backup server object
-		my $dbs = new $server_pkg($self);
+		# set server params to global vals if undefined
+		foreach my $param (keys %{$self->{backup_params}}) {
+			$self->_debug("Setting $server $param to default if value false",3);
+			$self->{$server}{backup_params}{$param}
+				||= $self->{backup_params}{$param};
+		} # for each backup param global
 		
-		my $host = $self->{db_connect}{HOSTNAME};
-		my $log_dir = $self->{backup_params}{LOG_DIR};
-		my $dump_dir = $self->{backup_params}{DUMP_DIR};
-		my $dump_copies = $self->{backup_params}{DUMP_COPIES};
-		my $conf_file = $self->{backup_params}{CONF_FILE};
+		my $server_type = $self->{$server}{server_type};
+		my $host = $self->{$server}{connect}{RDBMS_HOST};
+		my $log_dir = $self->{$server}{backup_params}{LOG_DIR};
+		my $dump_dir = $self->{$server}{backup_params}{DUMP_DIR}
+			|| $self->{backup_params}{DUMP_DIR};
+		my $dump_copies = $self->{$server}{backup_params}{DUMP_COPIES}
+			|| $self->{backup_params}{DUMP_COPIES};
 		$time = localtime();
 		
-		
-#		warn "Starting log";
-	
 		# Greeting message
 		print $self->{LOG} <<LOG;
 	
 $server backup parameters:
-	Host and mysql server: $host
+	RDBMS: $server_type
+	Host: $host
 	Log dir: $log_dir
 	Dump dir: $dump_dir
 	Dumps to keep: $dump_copies
-	Backup config file: $conf_file
 	
 *Tidying up dump dirs*
 LOG
 		
+		# the only arg usually passed to extension?
+		my $HR_server_conf = $self->{$server};
 		
-#		warn "_tidy_dump_dirs";
+		$self->_debug( "_tidy_dump_dirs");
 		# clean up dump dirs
 		$self->_tidy_dump_dirs();
 		
@@ -221,22 +253,34 @@ LOG
 		my $disk_usage = `df '$dump_dir'`; 
 		print $self->{LOG} "\n\n*Disk space report for $dump_dir*\n$disk_usage";
 		
+		##
+		## example server method call
+		##
+		
+		my $flush_logs = "$server_flush_logs";
+		$self->$flush_logs($HR_server_conf);
+		
+		##
+		## Below here is unmodified from port
+		##
+		
+		
 		# check the list of currently running mysql queries
 		print $self->{LOG} "\n\n*Current processlist*\n";
-#		warn "_get_process_list";
+		$self->_debug( "_get_process_list");
 		print $self->{LOG} $self->_get_process_list();
 		
 		# rotate the logs.  most text log files need to be renamed manually
 		# before the "flush logs" command is issued to mysqld
 		# we rotate logs daily (well, every time script is run)
 		print $self->{LOG} "\n\n*Rotating logs*\n";
-#		warn "_rotate_general_query_log";
+		$self->_debug("_rotate_general_query_log");
 		$self->_rotate_general_query_log();
-#		warn "_rotate_slow_query_log";
+		$self->_debug("_rotate_slow_query_log");
 		$self->_rotate_slow_query_log();
-#		warn "_cycle_bin_logs";
+		$self->_debug("_cycle_bin_logs");
 		$self->_cycle_bin_logs();
-#		warn "_rotate_error_log";
+		$self->_debug("_rotate_error_log");
 		$self->_rotate_error_log();
 		
 		# Backup the databases only if today is the day which is 
@@ -246,13 +290,13 @@ LOG
 		
 		if (grep(/$cur_day/i, @backup_days)) {
 			print $self->{LOG} "\n\n*Starting dumps*\n";
-#			warn '_backup_databases';
+			$self->_debug( '_backup_databases');
 			my $b_errs = $self->_backup_databases();
 			
 			# if there were no problems backing up dbs, rotate the dump dirs
 			if (not $b_errs) {
 				print $self->{LOG} "\n\n*Rotating dump dirs*\n";
-#				warn '_rotate_dump_dirs';
+				$self->_debug( '_rotate_dump_dirs');
 				$self->_rotate_dump_dirs();
 			} # if no backup errors
 		} # if today is a database backup day
@@ -505,23 +549,6 @@ sub _tidy_dump_dirs {
 } # end _tidy_dump_dirs
 
 
-=head1 error()
-
-	Logs all the errors so far to a log file then 
-	sends an email and exits.
-
-=cut
-
-sub error {
-	my $self = shift;
-	my $message = shift;
-	print $self->{LOG} $message;
-	$self->log_messages();
-	$self->send_email_notification();
-	exit 1;
-}
-
-
 =head1 send_email_notification()
 
 	Sends the data from the 00 run of the program 
@@ -533,7 +560,7 @@ sub error {
 
 sub send_email_notification {
 	my $self = shift;
-#	warn "self? $self";
+	$self->_debug("self? $self");
 	
 	# Email notifications can be turned off although this
 	# is usually not a good idea
@@ -558,6 +585,65 @@ sub send_email_notification {
 		 retries => 3 ); 
 
 } # end send_email_notification()
+
+
+# Log debug messages. Supress die on _gripe at high debug by
+# setting die to -1
+sub _debug {
+	my $self = shift;
+	my $msg = shift;
+	my $level = shift || 1;
+	
+	$self->_gripe($msg,-1) if $self->{DEBUG} >= $level;
+} # _debug
+
+
+# uses gripes message controls, but instructs exit
+sub _error {
+	my $self = shift;
+	$self->_gripe(shift,1);
+} # _error
+
+# debug level modified warn replacement using Carp
+sub _gripe {
+	my $self = shift;
+	my $msg = shift || confess("gripe without message");
+	my $die = shift || 0;
+	
+	my @call = caller;
+	@call = caller(1) if $die; # -1 from debug should be true here as well
+	my $pkg = $call[0];
+	$call[1] =~ s{.+/}{};
+	$msg = "$call[1]" . "[$call[2]]: $msg";
+	
+	
+	my $debug = $self->{DEBUG};
+	$die++ if $debug > 3;
+	
+	$self->log_messages();
+	$self->send_email_notification();
+	exit 1;
+	
+	
+	print $self->{LOG} $msg;
+	
+	if ($die && $debug) {
+		print $self->{LOG} "FATAL: $msg\n";
+		confess("$msg\n");
+	} # if we're dying and debug is on
+	elsif ($die) {
+		print $self->{LOG} "FATAL: $msg\n";
+		croak("$msg\n");
+	} # or die with just the message
+	elsif ($debug > 1) {
+		print $self->{LOG} "$msg\n";
+		cluck("$msg\n");
+	} # verbose warn
+	else {
+		print $self->{LOG} "$msg\n";
+		carp("$msg\n");
+	} # just let em know the basics
+} # _gripe
 
 
 1;
@@ -586,7 +672,7 @@ This module requires these other modules and libraries:
 =head1 DESCRIPTION
 
 Manages rotation of mysql database logs and database backups. Reads information
-on which databases to back up on what days fo the week from the configuration
+on which databases to back up on what days for the week from the configuration
 file. If no file is specified, it will look for one at /etc/mysql-backup.conf.
 If no configuration file is found program will exit with a failure.
 
@@ -620,7 +706,8 @@ can be found in the comments in the configuration file
 
 log-slow-queries
 log-long-format
-log-bin
+log-bin # required
+log-error # should be required?
 
 =head1 OPTIONS
 
@@ -680,6 +767,17 @@ Support multiple servers of the same type.
 
 Partial port from original MySQL specific version.
 
+=item 0.1.1
+
+Some more work on getting port working and some comments. Early release
+for boston.pm mailing list.
+
+=item 0.1.2
+
+Improved configuration handling allowing multiple servers per RDBMS type.
+Draft example of calling extension method and providing only server specific
+conf hash explicitly instead of making extension find it.
+
 =back
 
 
@@ -690,6 +788,7 @@ The mailing list for the DBA modules is perl-dba@fini.net. See
 http://lists.fini.net/mailman/listinfo/perl-dba to subscribe.
 
 dba-backup.yml
+dba-backup
 
 =head1 AUTHOR
 
